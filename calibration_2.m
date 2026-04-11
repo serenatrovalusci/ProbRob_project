@@ -1,21 +1,3 @@
-function delta = h_odom(x,ticks)
-
-  k_steer  = x(1);
-  k_traction  = x(2);
-  b   = x(3);
-  steer_offset = x(4);
-
-  t_steer  = ticks(1);
-  t_traction_prev  = ticks(2);
-  t_traction_curr  = ticks(3);
-  
-  dph = k_steer * t_steer - steer_offset;
-  dl = k_traction * (t_traction_curr - t_traction_prev);
-  dth = dl * tan(dph) / b;
-  dx = dl * cos(dth);
-  dy = dl * sin(dth);
-  delta = [dx, dy, dth, dphi]';
-endfunction
 
 function delta = h_odom(x, ticks)
   k_steer      = x(1);
