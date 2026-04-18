@@ -1,139 +1,169 @@
 function calibration_3()
 
-    %==========================================================
-    % LOAD DATA
-    %=========================================================
-    filename = 'dataset.txt';
-    [times, t_steer, t_traction, model_pose, tracker] = load_dataset(filename);
+  %==========================================================
+  % 1. LOAD DATA, ENCODER DATA PREPROCESSING 
+  %=========================================================
+  filename = 'dataset.txt';
+  [times, t_steer, t_traction, model_pose, tracker] = load_dataset(filename);
 
-    n = length(times);
-    delta_traction = zeros(n, 1);
-    for i = 1:n-1
-        diff = t_traction(i+1) - t_traction(i);
-        if diff < 0 
-          if diff < -2^31
-            diff = diff + 2^32;
-          else
-            diff = 0
-          endif
-        endif
-        delta_traction(i+1) = diff;      %this vector dimension is n-1, instead of modifying all the dimensions i choose to add one extra zero at the beginning
-    endfor
+  printf('times:      %d x %d\n', size(times, 1),      size(times, 2));
+  printf('t_steer:    %d x %d\n', size(t_steer, 1),    size(t_steer, 2));
+  printf('t_traction: %d x %d\n', size(t_traction, 1), size(t_traction, 2));
+  printf('model_pose: %d x %d\n', size(model_pose, 1), size(model_pose, 2));
+  printf('tracker:    %d x %d\n', size(tracker, 1),    size(tracker, 2));
 
-    delta_traction = delta_traction/5000;
-    steer_tick = t_steer / 8192;
+  n = length(times);
+  delta_traction = zeros(n, 1);
 
-    figure(1);   
-    clf;
-    hold on;
-    plot(delta_traction, 'r-', 'LineWidth', 2);
-    legend('Delta Traction');
-    xlabel('x');
-    ylabel('y [m]');    
-    title('delta');
-    grid on;
-    figure;
-
-
-    printf('times:      %d x %d\n', size(times, 1),      size(times, 2));
-    printf('t_steer:    %d x %d\n', size(t_steer, 1),    size(t_steer, 2));
-    printf('t_traction: %d x %d\n', size(t_traction, 1), size(t_traction, 2));
-    printf('model_pose: %d x %d\n', size(model_pose, 1), size(model_pose, 2));
-    printf('tracker:    %d x %d\n', size(tracker, 1),    size(tracker, 2));
-    
-    [max_val, max_idx] = max(delta_traction);
-    printf('max value = %.0f at index %d\n', max_val, max_idx);
-
-    [max_val, max_idx] = max(t_steer);
-    printf('max value = %.0f at index %d\n', max_val, max_idx);
-
-    %normalize delta_traction between 0 and 5000 ????
-    %delta_traction = delta_traction / max(delta_traction) * 5000;
-
-    %normalize t_steer between 0 and 8192 ???
-    %t_steer = t_steer / max(t_steer) * 8192;
-
-    ticks = [t_steer, delta_traction];  % n x 2
-
-    %==========================================================
-    % PLOT DATA: TRACKER wrt WORLD
-    %==========================================================
-   
-    
-    figure(2);   
-    clf;
-    hold on;
-    plot(tracker(:,1), tracker(:,2), 'r-', 'LineWidth', 2);
-    legend('Tracker Pose');
-    xlabel('x [m]');
-    ylabel('y [m]');    
-    title('Trajectory of Tracker');
-    grid on;
-
-    %==========================================================
-    % COMPUTE ODOMETRY Trajectory
-    %==========================================================
-
-    x = [0.1; 0.0106141; 1.4; 0];  % initial guess for the parameters : [ Ksteer Ktraction axis_length steer_offset ]
-    
-    U = zeros(n, 3);
-    for i = 1:n
-        ticks_i = ticks(i, :)';
-        U(i,:) = h_odom(x, ticks_i)';
-    endfor 
-
-    T = compute_odometry_trajectory(U);
-    
-
-    %==========================================================
-    % PLOT DATA: ODOMETRY TRAJECTORY AND TRACKER POSE
-    %==========================================================
-
-    figure(3);
-    clf;
-    hold on;
-    plot(T(:,1),       T(:,2),       'b-', 'LineWidth', 1);
-    plot(tracker(:,1), tracker(:,2), 'r-', 'LineWidth', 1);
-    legend('Odometry (biased)', 'Model Pose');
-    xlabel('x [m]');
-    ylabel('y [m]');
-    title('Trajectory comparison');
-    grid on;
-
-    %==========================================================
-    % CALIBRATION
-    %==========================================================
-
-  % Generate Measurement matrix Z
-
-    Z = zeros(5, n);
-    Z(1:2, :) = ticks';   % 2 tick values
-    Z(3:5,:) = tracker';       % 3 odometry measurements
-
-  % Perform one round of Gauss-Newton optimization
-    printf('Performing one round of Gauss-Newton optimization...\n');
-
-    U = zeros(n, 3);
-    for i = 1:1
-      [x_new, chi] = oneRound(x, Z);
-      printf('Round %d: chi = %.6f\n', i, chi);
-      x = x_new;
-
-    endfor
+  for i = 1:n-1
+      diff = t_traction(i+1) - t_traction(i);
       
+      % Correzione overflow
+      if diff < -2^31
+          diff = diff + 2^32;   % wraparound
+      end
+      
+      delta_traction(i+1) = diff;
+  end
 
-    printf('Updated parameters: k_steer = %.4f, k_traction = %.6f, b = %.2f, steer_offset = %.2f\n', x_new(1), x_new(2), x_new(3), x_new(4));  
+  t_steer_signed = zeros(n, 1);     % convert t_steer from unsigned to signed
+  for i = 1:n
+      if t_steer(i) > 4096
+          t_steer_signed(i) = t_steer(i) - 8192;
+      else 
+          t_steer_signed(i) = t_steer(i);
+      endif
+  endfor
 
+  ticks_vec = [t_steer_signed, delta_traction];  % n x 2
+
+
+  %=========================================================================================
+  % 2. ESTIMATE MODEL POSE (wrt world) WITH KINEMATIC MODEL and NOMINAL PARAMETERS.
+  %=========================================================================================
+
+  x = [0.1; 0.0106141; 1.4; 0];  % initial guess for the parameters : [ Ksteer Ktraction axis_length steer_offset ]
+
+  T = zeros(n, 3);                  % estimated model pose (x, y, theta) for each measurement
+  prev_pose = [0 0 0];              % assuming the robot starts at the origin with zero orientation
+  for i = 1:n
+    ticks = [t_steer_signed(i), delta_traction(i)];
+    next_pose = estimate_model_pose(x, ticks, prev_pose);
+    T(i, :) = next_pose;
+    prev_pose = next_pose;
+  endfor
+
+  % Some debugging prints 
+  %for i= 120:130
+    %printf('row %d, x_p = %.6f, y_p = %.6f, theta_p = %.6f\n, x = %.6f, y = %.6f, theta = %.6f\n ', i, T(i, 1), T(i, 2), T(i, 3), model_pose(i, 1), model_pose(i, 2), model_pose(i, 3));
+  %endfor
+  %for i= 120:130
+    %printf('row %d, t traction %d \n', i,t_traction(i));
+  %endfor
+  %for i= 120:130
+    %printf('row %d, t steer %d \n', i, t_steer(i));
+  %endfor
+  %for i= 120:130
+    %printf('row %d, delta traction %d \n', i, delta_traction(i));
+  %endfor
+  %for i= 1:n
+    %e(i) = (T(i, 1) - model_pose(i, 1))^2 + (T(i, 2) - model_pose(i, 2))^2 + (T(i, 3) - model_pose(i, 3))^2;
+    %if e(i) > 1e-5
+      %printf('row %d, x_p = %.6f, y_p = %.6f, theta_p = %.6f\n, x = %.6f, y = %.6f, theta = %.6f\n ', i, T(i, 1), T(i, 2), T(i, 3), model_pose(i, 1), model_pose(i, 2), model_pose(i, 3));
+      %break;
+    %endif
+  %endfor
+
+  figure(1);   
+  clf;
+  hold on;
+  plot(model_pose(:,1), model_pose(:,2), 'r-', 'LineWidth', 1);
+  plot(T(:,1), T(:,2), 'b-', 'LineWidth', 1);
+  legend('Model Pose', 'Estimated Model Pose');
+  xlabel('x [m]');
+  ylabel('y [m]');    
+  title('Trajectory of Model Pose');
+  grid on;
+
+  %========================================================================================
+  % 3. PLOT TRACKER POSE (wrt world) AND BIASED MODEL POSE ESTIMATE.
+  %========================================================================================
+  
+  figure(2);
+  clf;
+  hold on;
+  plot(tracker(:,1), tracker(:,2), 'r-', 'LineWidth', 1);
+  plot(T(:,1), T(:,2), 'b-', 'LineWidth', 1);
+  legend('Tracker', 'Biased Model Pose');
+  xlabel('x [m]');
+  ylabel('y [m]');
+  title('Trajectory comparison');
+  grid on;
+
+  %==========================================================
+  % 4. CALIBRATION WITH GAUSS-NEWTON
+  %==========================================================
+  delta_tracker = relative_pose(tracker);
+
+  x = [0.1; 0.0106141; 1.4; 0];
+
+  U = zeros(n, 3);
+  for i = 1:n
+    U(i, :) = h_odom(x,ticks_vec(i,:));
+  endfor
+
+  Traj_relative_biased = compute_odometry_trajectory(U);
+
+  %build the measurement matrix Z for the increments, with subsampling
+
+  Z = [];
+  k = 1;
+  for i = 1:n
+    if abs(delta_traction(i))   % subsampling condition, to select only the measurements with significant movement
+      Z(1:2, k) = ticks_vec(i, :)';      % o adattare se è vettore
+      Z(3:5, k) = delta_tracker(i,:)';
+      k = k + 1;
+    endif  
+  endfor
+
+    % Perform one round of Gauss-Newton optimization
    
+    for i = 1:20
+        [x_new, chi] = oneRound(x, Z);
+        printf('Round %d: chi = %.6f\n', i, chi);
+        x = x_new;
+      endfor
+        
+      printf('Updated parameters: k_steer = %.4f, k_traction = %.6f, b = %.2f, steer_offset = %.2f\n', x_new(1), x_new(2), x_new(3), x_new(4));
 
-   
+  U_cal = zeros(n, 3);
+  for i = 1:n
+    U_cal(i, :) = h_odom(x_new,ticks_vec(i,:));
+  endfor
 
+  Tbs = [1 0 1.5;
+         0 1 0;
+         0 0 1];  
+  Traj_relative_calibrated = compute_odometry_trajectory(U_cal);
+
+
+  figure(3);
+  clf;
+  hold on;
+  plot(Traj_relative_calibrated(:,1), Traj_relative_calibrated(:,2), 'b-', 'LineWidth', 1);
+  plot(Traj_relative_biased(:,1), Traj_relative_biased(:,2), 'g-', 'LineWidth', 1);
+  plot(tracker(:,1), tracker(:,2), 'r-', 'LineWidth', 1);
+  legend('Odometry (calibrated)', 'Odometry(biased)', 'Tracker');
+  xlabel('x [m]');
+  ylabel('y [m]');
+  title('Trajectory comparison');
+  grid on;
 
 
 endfunction  
 
 %=========================================================
-LOCAL FUNCTIONS
+%LOCAL FUNCTIONS
 %=========================================================
 
 % Load data
@@ -171,6 +201,57 @@ function [times, t_steer, t_traction, model_pose, tracker] = load_dataset(filena
   printf('Loaded %d measurements\n', length(times));
 endfunction
 
+% Estimate Model Pose
+
+function next_pose= estimate_model_pose(x,ticks,prev_state)
+
+  k_steer = x(1);
+  ktraction = x(2);
+  b = x(3);
+  steer_offset = x(4);
+
+  t_steer = ticks(1);
+  delta_traction = ticks(2);
+  
+  x_prev = prev_state(1);
+  y_prev = prev_state(2);
+  theta_prev= prev_state(3);
+
+  v = (ktraction/5000) * delta_traction;
+  phi = (k_steer*2*pi/8192) * t_steer + steer_offset;
+
+
+  x_next = x_prev + v * cos(theta_prev);
+  y_next = y_prev + v * sin(theta_prev);
+  theta_next = theta_prev + v*phi/b;
+
+  next_pose = [x_next, y_next, theta_next];
+ 
+endfunction
+
+
+%Estimate Odometry increment 
+
+function delta = h_odom(x, ticks)
+  k_steer      = x(1);
+  k_traction   = x(2);
+  b            = x(3);
+  steer_offset = x(4);
+
+  t_steer          = ticks(1);
+  delta_traction   = ticks(2);   % già il delta, calcolato fuori
+
+  dl = (k_traction/5000) * delta_traction;
+  dph = (k_steer*2*pi/8192) * t_steer + steer_offset;
+
+  dth = dl * dph / b;
+  dx  = dl * cos(dth);
+  dy  =  sin(dth);
+
+  delta= [dx; dy; dth];
+  
+endfunction
+
 % Convert between vector and homogeneous transformation matrix
 
 function A=v2t(v)
@@ -187,139 +268,54 @@ function v=t2v(A)
     v(3, 1)   = atan2(A(2,1), A(1,1));
 end
 
-% Compute the trajectory from the odometry measurements
-
-function T=compute_odometry_trajectory(U)
-	T=zeros(size(U,1),3);   % pre-allocate the trajectory matrix 
-	current_T=v2t(zeros(1,3)); % converts vector into a rotation matrix full of zeros (initial pose)
-	for i=1:size(U,1),
-		u=U(i,1:3)' ;
-		
-		current_T = current_T * v2t(u);  % (world) current_T(i) = (world) current_T (i-1) * (i-1) relative pose (i)
-		T(i,1:3)=t2v(current_T)';  % converts the current pose into a vector and stores it in the trajectory matrix as a row vector
-	endfor
-end
-
-
-% Compute the odometry measurement from the ticks and the parameters
-
-function delta = h_odom(x, ticks)
-  k_steer      = x(1);
-  k_traction   = x(2);
-  L            = x(3);
-  steer_offset = x(4);
-
-  steer_tick   = ticks(1);
-  delta_tick   = ticks(2);
-
-  phi = k_steer * steer_tick - steer_offset;   % o + offset, dipende dalla convenzione
-  dl  = k_traction * delta_tick;               % distanza ruota anteriore
-
-  dth = (dl / L) * sin(phi);
-  dx  = dl * cos(phi);
-  dy  = 0;
-
-  delta = [dx; dy; dth];
-end
-
-%function delta = h_odom(x, ticks)
-  %k_steer      = x(1);
-  %k_traction   = x(2);
-  %b            = x(3);
-  %steer_offset = x(4);
-
-  %t_steer_tick   = ticks(1);
-  %delta_traction = ticks(2);
-
-  % steering angle (absolute encoder corrected by offset)
-  %dphi = k_steer *t_steer_tick - steer_offset;
-  % distance traveled
-  %dl = k_traction * delta_traction;
-
-  % tricycle kinematic model
-  %dth = dl * sin(dphi) / b;
-  %dx  = dl * cos(dth)*cos(dphi);
-  %dy  = dl * sin(dth)*cos(dphi);
-  %delta = [dx; dy; dth];
-%end
-
-%function delta = h_odom(x, ticks)
-  %k_steer      = x(1);
-  %k_traction   = x(2);
-  %b            = x(3);
-  %steer_offset = x(4);
-
-  %t_steer_tick   = ticks(1);
-  %delta_traction = ticks(2);
-
-  % steering angle (absolute encoder corrected by offset)
-  %dphi = k_steer *t_steer_tick - steer_offset;
-  % distance traveled
-  %dl = k_traction * delta_traction;
-
-  % tricycle kinematic model
-  %dth = dl * tan(dphi) / b;
-  %dx  = dl * cos(dth);
-  %dy  = dl * sin(dth);
-  %delta = [dx; dy; dth];
-%end
-
-% Compute the error and the Jacobian for one measurement
-
-function J = computeJacobian(x, ticks_all, j)
-  J = zeros(3, 4);
-  epsilon = 1e-6;
-  printf('E');
-  for i = 1:4
-    e_vec    = zeros(4, 1);
-    e_vec(i) = epsilon;
-    
-    pred_plus  = h_odom_absolute(x + e_vec, ticks_all)(j, :)';
-    pred_minus = h_odom_absolute(x - e_vec, ticks_all)(j, :)';
-    
-    J(:, i) = (pred_plus - pred_minus) / (2 * epsilon);
+function delta_tracker = relative_pose (tracker)
+  delta_tracker = zeros(size(tracker));
+  for i = 2:size(tracker, 1)
+    delta_tracker(i, :) = t2v(inv(v2t(tracker(i-1,:))) * v2t(tracker(i,:)));;
   endfor
 endfunction
 
-% Perform one round of Gauss-Newton optimization
+
+function [e, J] = errorAndJacobian(x, z)
+  ticks = z(1:2);   % 2 ticks
+  meas  = z(3:5);   % measurements
+  pred  = h_odom(x, ticks);
+  e     = pred - meas;
+  %e(3) = atan2(sin(e(3)), cos(e(3)));  % normalize angle error to [-pi, pi]
+  J     = zeros(3, 4);
+  epsilon  = 1e-3;
+  inv_eps2 = 0.5 / epsilon;
+  for i = 1:4
+    e_vec    = zeros(4, 1);
+    e_vec(i) = epsilon;
+    J(:, i)  = inv_eps2 * (h_odom(x + e_vec, ticks) - h_odom(x - e_vec, ticks));
+  endfor
+endfunction
 
 function [x_new, chi] = oneRound(x, Z)
   H     = zeros(4, 4);
   b     = zeros(4, 1);
   nmeas = size(Z, 2);
   chi   = 0;
-  printf('A')
-  ticks_all = Z(1:2, :)';  % n x 2
-  meas_all  = Z(3:5, :)';  % n x 3
-  printf('B')
-  % Calcola traiettoria completa UNA volta
-  pred_all = h_odom_absolute(x, ticks_all);  % n x 3
-  printf('C')
-  for j = 1:nmeas
-    pred = pred_all(j, :)';
-    meas = meas_all(j, :)';
-    e    = pred - meas;
-    
-    % Jacobiano numerico
-    J = computeJacobian(x, ticks_all, j);
-    
+  lambda = 1e-3;  % damping factor for Levenberg-Marquardt
+  for i = 1:nmeas
+    [e, J] = errorAndJacobian(x, Z(:, i));
     H   += J' * J;
     b   += J' * e;
-    chi += e' * e;  %'
+    chi += e' * e;   %'
   endfor
-  printf('D')
-  dx    = -H \ b;
+  dx    = -(H + lambda*eye(4)) \ b;
   x_new = x + dx;
 endfunction
 
-function odom_absolute = h_odom_absolute(x, ticks)
+function T=compute_odometry_trajectory(U)
+	T=zeros(size(U,1),3);   % pre-allocate the trajectory matrix 
+	current_T=v2t(zeros(1,3)); % converts vector into a rotation matrix full of zeros (initial pose)
+	for i=1:size(U,1),
+		u=U(i,1:3)' ;  %'
 
-  U = zeros(size(ticks, 1), 3);
-  for i = 1:size(ticks, 1)
-    ticks_i = ticks(i, :)';
-    U(i,:) = h_odom(x, ticks_i)';
-  endfor 
+		current_T = current_T * v2t(u);  % (world) current_T(i) = (world) current_T (i-1) * (i-1) relative pose (i)
+		T(i,1:3)=t2v(current_T)';  %' converts the current pose into a vector and stores it in the trajectory matrix as a row vector
+	end
+end
 
-  odom_absolute = compute_odometry_trajectory(U);
-    
-endfunction
