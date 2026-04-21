@@ -1,22 +1,69 @@
-The dataset.txt file contains the data that come from the sensor of a real robot.
-In particular in the first lines there are information about the kinematic model of the robot (traction_drive_wheel aka front-tractor tricycle), the kinematic parameters to be estimate, an intial guess of those, the encoder order of the field ticks and their max ranges. These two last information are important to interpret encoder ticks's data.
 
-A record of the dataset is compose by:
-	-time: 	       the time stamp
-	-ticks:        the reading of the encoders. The first is the steering one which is an absolute encoder, 
-			       the second is of the traction and it is an incremental one.
-	-model pose:   it is the odometry of our model. An important thing to clarify is that our model does not correspond to the one you have seen in AMR.
-				   You are free to formulate the kinematic model as you wish. For your task you can ignore this information.
-	-tracker pose: it is the position of the sensor coming from an odometry system for this sensor.
-	
-Tips on the encoder data: consider that the reading is stored in an uint32 variable, so in some cases it can happen that the variable overflow. Avoid this cases and consider only the incremental information about the encoder to do the integration of your model.
+**Kinematic Calibration for a Tricycle-Drive Robot**
 
-The output of the system has to be:
-- 2D position of the sensor w.r.t. the base link
-- The kinematic parameters: 
-	ksteer: how many radians correspond to one tick
-	ktraction: how many meter correspond to one tick
-	steer_offset: at which angle correspond the zero of the wheel
-	base_line: the lenght of the base_line (remember that the kinematic center is in the middle of the axis of the rear wheels)
+The goal of this project is to estimate the intrinsic kinematic parameters and the extrinsic sensor-to-base transformation to minimize the error between the robot's odometry and the ground truth.
 
+** Kinematic Model**
+The robot utilizes a front-wheel traction and steering system. For this project, the kinematic state (x,y,θ) is defined on the kinematic center located at the middle of the rear wheel axis.
 
+**Methodology**
+Evolution of the Approach
+
+Initially, I attempted to solve the optimization using relative poses of the base link. However, this approach proved to be overly chaotic due to the accumulation of noise and the sensitivity of incremental measurements.
+
+I decided to transition to absolute poses. By minimizing the error in the global trajectory, the system handles sensor noise much better and ensures a more stable, less "chaotic" convergence during the non-linear optimization process. I abandoned the first method because it was too intricate considering the data available in the dataset.
+
+**The "Warm Start" Breakthrough**
+
+During testing, I realized that the optimization process alone wouldn't converge. The "distance" between the default nominal parameters and the actual physical reality was too great for the non-linear solver to bridge, the optimizer would get stuck in local minima or diverge immediately.
+
+To solve this, I implemented a "Warm Start" phase. This analytical step pre-calculates the gains before the optimization begins by comparing total distance and total rotation between the tracker and the ticks. This brought the initial guess close enough to the global minimum that the non-linear solver could then successfully fine-tune the parameters.
+
+**Efficiency via Subsampling**
+
+The dataset contains a high volume of redundant information due to the high sampling frequency of the sensors. I realized that considering every single point made the optimization unnecessarily slow and noisy.
+
+By implementing a subsampling factor of 50, I ignored these repeated or near-identical samples. This allowed the optimizer to focus on the significant geometric changes of the trajectory, leading to a much faster and more stable convergence.
+
+** Calibration Outputs **
+
+** Results **
+Final Calibrated Parameters
+
+k_steer: 0.5197 rad/tick
+
+k_traction: 0.008308 m/tick
+
+base_line (b): 1.150 m
+
+steer_offset: -0.1233 rad
+
+Sensor Pose (wrt base link):
+
+x_sb=1.115 m
+
+y_sb=0.670 m
+
+θ_sb=0.5419 rad
+
+** Numerical Errors **
+
+RMSE XY: 148.34 cm
+
+RMSE Theta: 14.85 deg
+
+** Project Structure & Evaluation **
+calibration.m: Main logic and optimization script.
+
+Output Plots (PNGs):
+
+01_base_trajectory.png: Nominal base-link motion.
+
+02_pre_calibration.png: Visualizing the Warm Start improvement.
+
+04_final_trajectory.png: Final calibrated odometry vs. Ground Truth.
+
+05_error_analysis.png: Temporal breakdown of residual errors.
+
+** Usage **
+Run the calibration() function in Octave or MATLAB. The script automatically processes dataset.txt, handles uint32 encoder overflows, performs 30 iterations of the solver, and saves the plots to the disk.
