@@ -3,27 +3,31 @@
 
 The goal of this project is to estimate the intrinsic kinematic parameters and the extrinsic sensor-to-base transformation to minimize the error between the robot's odometry and the ground truth.
 
-** Kinematic Model**
+** Kinematic Model **
 The robot utilizes a front-wheel traction and steering system. For this project, the kinematic state (x,y,θ) is defined on the kinematic center located at the middle of the rear wheel axis.
 
-**Methodology**
+** Methodology and Minimization Algorithm **
 Evolution of the Approach
 
-Initially, I attempted to solve the optimization using relative poses of the base link. However, this approach proved to be overly chaotic due to the accumulation of noise and the sensitivity of incremental measurements.
+The calibration uses a Non-Linear Least Squares approach (Gauss-Newton). Since the motion equations are non-linear, I used Numerical Jacobians to determine how the trajectory reacts to changes in each parameter.
 
-I decided to transition to absolute poses. By minimizing the error in the global trajectory, the system handles sensor noise much better and ensures a more stable, less "chaotic" convergence during the non-linear optimization process. I abandoned the first method because it was too intricate considering the data available in the dataset.
+Initially, I attempted to solve the optimization using relative poses of the base link. However, this approach proved to be overly chaotic due to the accumulation of noise and the sensitivity of incremental measurements. I decided to transition to absolute poses. By minimizing the error in the global trajectory, the system handles sensor noise much better and ensures a more stable, less "chaotic" convergence during the non-linear optimization process. I abandoned the first method because it was too intricate considering the data available in the dataset.
 
-**The "Warm Start" Breakthrough**
+To handle outliers like wheel slips or tracker glitches, I implemented a Robust Kernel. If the error for a specific sample exceeds a threshold, the system scales down its weight. This prevents "bad" data points from distorting the final results.
+
+** Efficiency via Subsampling **
+
+The dataset contains a high volume of redundant information due to the high sampling frequency of the sensors. I realized that considering every single point made the optimization unnecessarily slow and noisy.
+
+By implementing a subsampling factor of 50, I ignored these repeated or near-identical samples. This allowed the optimizer to focus on the significant geometric changes of the trajectory, leading to a much faster and more stable convergence.
+
+** The "Warm Start" Breakthrough **
 
 During testing, I realized that the optimization process alone wouldn't converge. The "distance" between the default nominal parameters and the actual physical reality was too great for the non-linear solver to bridge, the optimizer would get stuck in local minima or diverge immediately.
 
 To solve this, I implemented a "Warm Start" phase. This analytical step pre-calculates the gains before the optimization begins by comparing total distance and total rotation between the tracker and the ticks. This brought the initial guess close enough to the global minimum that the non-linear solver could then successfully fine-tune the parameters.
 
-**Efficiency via Subsampling**
 
-The dataset contains a high volume of redundant information due to the high sampling frequency of the sensors. I realized that considering every single point made the optimization unnecessarily slow and noisy.
-
-By implementing a subsampling factor of 50, I ignored these repeated or near-identical samples. This allowed the optimizer to focus on the significant geometric changes of the trajectory, leading to a much faster and more stable convergence.
 
 ** Calibration Outputs **
 
