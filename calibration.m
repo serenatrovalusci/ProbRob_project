@@ -5,7 +5,18 @@ function calibration()
   filename = 'dataset.txt';
   [times, t_steer, t_traction, model_pose, tracker] = load_dataset(filename);
 
-  n = length(times);
+   n = length(times);
+
+  % Transform tracker to start at origin [0,0,0]
+  T0_inv = inv(v2t(tracker(1,:)));
+  tracker_aligned = zeros(size(tracker));
+  for i = 1:n
+      Ti = v2t(tracker(i,:));
+      tracker_aligned(i,:) = t2v(T0_inv * Ti)';
+  endfor
+  tracker = tracker_aligned;
+
+ 
   delta_traction = zeros(n, 1);
 
   % Traction encoder delta calculation with overflow/wraparound handling
@@ -36,7 +47,7 @@ function calibration()
   % 2. MODEL POSE ESTIMATE (NOMINAL PARAMETERS)
   %==========================================================================
   % Initial guess: [Ksteer, Ktraction, axis_length, steer_offset, x_sb, y_sb, theta_sb]
-  x = [0.1; 0.0106141; 1.4; 0; 1.4; 0; 0];  
+  x = [0.1; 0.0106141; 1.4; 0; 1.5; 0; 0];  
 
   T_base_pose = estimate_model_pose(x, ticks_vec);
 
@@ -50,10 +61,10 @@ function calibration()
   grid on;
 
   %==========================================================================
-  % 3. WARM START & SENSOR POSE ESTIMATE
+  % 3. INITIAL STATE & SENSOR POSE ESTIMATE
   %==========================================================================
   % Estimate initial parameters to ensure the optimization starts near reality
-  x_init = warm_start(ticks_vec, tracker, x);  
+  x_init =initial_state(ticks_vec, tracker, x);  
   
   ticks_vec_transposed = ticks_vec'; 
   T_sensor_pose = estimate_sensor_pose(x, ticks_vec_transposed);
@@ -64,7 +75,7 @@ function calibration()
   plot(tracker(:,1), tracker(:,2), 'r-', 'LineWidth', 1.5);
   plot(T_sensor_pose(:,1), T_sensor_pose(:,2), 'b-', 'LineWidth', 1.5);
   plot(T_sensor_pose_init(:,1), T_sensor_pose_init(:,2), 'g-', 'LineWidth', 1.5);
-  legend('Tracker GT', 'Nominal Params', 'Warm Start');
+  legend('Tracker GT', 'Nominal Params', 'Initial State');
   xlabel('x [m]'); ylabel('y [m]');
   title('Pre-Calibration Trajectory Comparison');
   grid on;
@@ -128,12 +139,15 @@ function calibration()
   line([0 length(err)], [0 0], 'Color', 'k', 'LineStyle', '--');
 
   % --- SAVE PLOTS TO DISK (Low Resolution) ---
-  fprintf('\nSaving plots to current directory...\n');
-  print(1, '01_base_trajectory.png', '-dpng', '-r72');
-  print(2, '02_pre_calibration.png', '-dpng', '-r72');
-  print(4, '04_final_trajectory.png', '-dpng', '-r72');
-  print(5, '05_error_analysis.png', '-dpng', '-r72');
-  fprintf('Plots saved successfully.\n');
+  fprintf('\nSaving plots to directory "plots"...\n');
+  if ~exist('plots', 'dir')
+      mkdir('plots');
+  end
+  print(1, 'plots/01_base_trajectory.png', '-dpng', '-r72');
+  print(2, 'plots/02_pre_calibration.png', '-dpng', '-r72');
+  print(4, 'plots/04_final_trajectory.png', '-dpng', '-r72');
+  print(5, 'plots/05_error_analysis.png', '-dpng', '-r72');
+  fprintf('plots/Plots saved successfully.\n');
 
 endfunction
 
@@ -166,11 +180,13 @@ function h_odom = estimate_model_pose(x, ticks)
   dl = (ktraction/5000) * ticks(:,2);
   dphi = (k_steer*2*pi/8192) * ticks(:,1) + steer_offset;
   h_odom = zeros(n, 3);
-  h_odom(1, :) = [0, 0, 0];
-  for i = 2:n
-    xp(i) = xp(i-1) + dl(i) * cos(thetap(i-1))*cos(dphi(i));
-    yp(i) = yp(i-1) + dl(i) * sin(thetap(i-1))*cos(dphi(i));
-    thetap(i) = thetap(i-1) + dl(i)*sin(dphi(i))/b;
+  for i = 1:n
+    if i > 1
+      xp(i) = xp(i-1) + dl(i) * cos(thetap(i-1)) * cos(dphi(i));
+      yp(i) = yp(i-1) + dl(i) * sin(thetap(i-1)) * cos(dphi(i));
+      thetap(i) = thetap(i-1) + dl(i) * sin(dphi(i)) / b;
+    endif
+    
     h_odom(i, :) = [xp(i), yp(i), thetap(i)];
   endfor
 endfunction
@@ -179,18 +195,30 @@ function h_odom = estimate_sensor_pose(x, ticks)
   k_steer = x(1); ktraction = x(2); b = x(3); steer_offset = x(4);
   x_sb = x(5); y_sb = x(6); theta_sb = x(7);
   n = size(ticks, 2);
-  xp = zeros(n, 1); yp = zeros(n, 1); thetap = zeros(n, 1);
   dl = (ktraction/5000) * ticks(2,:)';
   dphi = (k_steer*2*pi/8192) * ticks(1,:)' + steer_offset;
-  Tbs = [cos(theta_sb) -sin(theta_sb) x_sb; sin(theta_sb) cos(theta_sb) y_sb; 0 0 1];
+  Tbs = v2t([x_sb; y_sb; theta_sb]);
   h_odom = zeros(n, 3);
-  h_odom(1, :) = [xp(1), yp(1), thetap(1)];
-  for i = 2:n
-    xp(i) = xp(i-1) + dl(i) * cos(thetap(i-1))*cos(dphi(i));
-    yp(i) = yp(i-1) + dl(i) * sin(thetap(i-1))*cos(dphi(i));
-    thetap(i) = thetap(i-1) + dl(i)*sin(dphi(i))/b;
+
+  xp = zeros(n,1); yp = zeros(n,1); thetap = zeros(n,1);
+
+  for i = 1:n
+    if i > 1
+      xp(i) = xp(i-1) + dl(i) * cos(thetap(i-1)) * cos(dphi(i));
+      yp(i) = yp(i-1) + dl(i) * sin(thetap(i-1)) * cos(dphi(i));
+      thetap(i) = thetap(i-1) + dl(i) * sin(dphi(i)) / b;
+    endif
+    
     Twb = v2t([xp(i), yp(i), thetap(i)]);
     h_odom(i, :) = t2v(Twb * Tbs)';
+  endfor
+
+  % Forza anche la predizione a partire da [0,0,0]
+  % Questo annulla l'offset costante di 1.4m per l'ottimizzatore
+  T_start_inv = inv(v2t(h_odom(1,:)));
+  for i = 1:n
+      Ti = v2t(h_odom(i,:));
+      h_odom(i,:) = t2v(T_start_inv * Ti)';
   endfor
 endfunction
 
@@ -227,8 +255,9 @@ function J_all = precompute_jacobians(x, ticks)
   endfor
 endfunction
 
-function x = warm_start(ticks, tracker, x_nom)
+function x = initial_state(ticks, tracker, x_nom)
   k_s_nom = x_nom(1); k_t_nom = x_nom(2); b_nom = x_nom(3);
+  s_o_nom = x_nom(4); x_sb_nom = x_nom(5); y_sb_nom = x_nom(6); theta_sb_nom = x_nom(7);
   t_steer = ticks(:, 1);
   dtrac   = ticks(:, 2);
   steer_ang = (k_s_nom * 2 * pi / 8192) * t_steer;
@@ -238,9 +267,8 @@ function x = warm_start(ticks, tracker, x_nom)
   dth_trk = diff(tracker(:, 3)); tot_trk = sum(abs(atan2(sin(dth_trk), cos(dth_trk))));
   tot_odom = sum(abs(dtrac * k_t / 5000 .* sin(steer_ang) / b_nom));
   k_s      = k_s_nom * tot_trk / max(tot_odom, 1e-9);
-  max_t = max(abs(t_steer));
-  if k_s * 2 * pi / 8192 * max_t > pi / 3, k_s = (pi/3)*8192/(2*pi*max_t); end
-  x = [k_s; k_t; b_nom; 0; 1.5; 0; 0];
+  
+  x = [k_s; k_t; b_nom;s_o_nom ; x_sb_nom;y_sb_nom ; theta_sb_nom];
 endfunction
 
 function A = v2t(v)
