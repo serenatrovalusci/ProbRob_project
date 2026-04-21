@@ -71,3 +71,5 @@ Output Plots (PNGs):
 
 ** Usage **
 Run the calibration() function in Octave or MATLAB. The script automatically processes dataset.txt, handles uint32 encoder overflows, performs 30 iterations of the solver, and saves the plots to the disk.
+
+Serena Trovalusci 2128733
